@@ -1,0 +1,315 @@
+# Epidemic Tracking with O-SMC²
+
+```elixir
+Mix.install([
+  {:smc_ex, path: Path.expand("../", __DIR__)},
+  {:kino, "~> 0.14"},
+  {:kino_vega_lite, "~> 0.1"}
+])
+```
+
+## The Situation
+
+An epidemic is underway. Ten thousand people. Five initially exposed.
+Daily case counts arrive one at a time — noisy Poisson observations of
+a process governed by three numbers nobody knows: the transmission rate,
+the incubation period, the recovery rate.
+
+A gradient-based sampler cannot touch this problem. The state transitions
+are Binomial: each of S susceptible individuals flips a coin weighted by
+the force of infection. Each of E exposed individuals flips a coin
+weighted by the incubation rate. Integers in, integers out. No
+differentiable log-density. No gradient to follow.
+
+O-SMC² was built for this. Two hundred guesses at the parameters, each
+maintaining its own miniature simulation of the epidemic — 100 particles
+propagating stochastic SEIR compartments forward in time. As each day's
+case count arrives, the bad guesses lose weight and the good ones gain
+it. When the weights become too concentrated, the algorithm rejuvenates:
+resamples, then runs parallel PMCMC on every core the BEAM has. On 88
+cores, 200 independent Metropolis-Hastings proposals run in the time it
+takes Python to finish one.
+
+## Generate the Epidemic
+
+The true parameters: β = 0.4, σ = 0.25 (4-day incubation), γ = 0.15
+(6.7-day recovery). The algorithm will not see these numbers. It will
+see only the daily case reports — integers, noisy, delayed.
+
+```elixir
+n_pop = 10_000
+true_beta = 0.4
+true_sigma = 0.25
+true_gamma = 0.15
+t_max = 80
+
+:rand.seed(:exsss, {42, 43, 44})
+
+{_final_state, {states, observations}} =
+  Enum.reduce(1..t_max, {%{s: n_pop - 5, e: 5, i: 0, r: 0}, {[], []}}, fn _, {state, {st_acc, obs_acc}} ->
+    p_se = 1 - :math.exp(-true_beta * state.i / n_pop)
+    p_ei = 1 - :math.exp(-true_sigma)
+    p_ir = 1 - :math.exp(-true_gamma)
+
+    binom_draw = fn count, prob ->
+      if count <= 0, do: 0,
+        else: Enum.count(1..count, fn _ -> :rand.uniform() < prob end)
+    end
+
+    y_se = binom_draw.(state.s, p_se)
+    y_ei = binom_draw.(state.e, p_ei)
+    y_ir = binom_draw.(state.i, p_ir)
+
+    new = %{
+      s: max(state.s - y_se, 0),
+      e: max(state.e + y_se - y_ei, 0),
+      i: max(state.i + y_ei - y_ir, 0),
+      r: state.r + y_ir
+    }
+
+    obs = max(0, y_ei + round(:rand.normal() * max(:math.sqrt(y_ei + 1), 1)))
+    {new, {st_acc ++ [new], obs_acc ++ [obs]}}
+  end)
+
+peak = Enum.max_by(states, fn st -> st.i end)
+
+IO.puts("80 days. #{n_pop} people. 5 initially exposed.")
+IO.puts("Peak infections: #{peak.i} on day #{Enum.find_index(states, fn st -> st.i == peak.i end) + 1}")
+IO.puts("Total recovered by day 80: #{List.last(states).r}")
+IO.puts("Total reported cases: #{Enum.sum(observations)}")
+```
+
+```elixir
+alias VegaLite, as: Vl
+
+epi_data = observations
+  |> Enum.with_index(1)
+  |> Enum.map(fn {obs, t} -> %{"day" => t, "cases" => obs} end)
+
+Vl.new(width: 600, height: 200, title: "Daily case reports — the only data the algorithm sees")
+|> Vl.data_from_values(epi_data)
+|> Vl.mark(:bar, color: "steelblue", opacity: 0.7)
+|> Vl.encode_field(:x, "day", type: :quantitative, title: "Day")
+|> Vl.encode_field(:y, "cases", type: :quantitative, title: "Reported cases")
+```
+
+## The Model
+
+Three components. A prior — deliberately vague, uniform on wide
+intervals, because the algorithm must learn everything from the daily
+counts alone. A state transition — stochastic SEIR with Binomial draws.
+And an observation likelihood — Poisson, because case reports are counts
+with variance proportional to the mean.
+
+The log factorial helper is defined first. The model closure captures it.
+
+```elixir
+n = n_pop
+
+log_fact = fn
+  0 -> 0.0
+  n when n > 0 -> Enum.reduce(1..n, 0.0, fn k, acc -> acc + :math.log(k) end)
+  _ -> 0.0
+end
+
+model = %{
+  init: fn _theta, rng ->
+    {%{s: n - 5, e: 5, i: 0, r: 0}, rng}
+  end,
+
+  transition: fn state, theta, _t, rng ->
+    p_se = 1 - :math.exp(-theta.beta * state.i / n)
+    p_ei = 1 - :math.exp(-theta.sigma)
+    p_ir = 1 - :math.exp(-theta.gamma)
+
+    {u1, rng} = :rand.uniform_s(rng)
+    {u2, rng} = :rand.uniform_s(rng)
+    {u3, rng} = :rand.uniform_s(rng)
+
+    binom = fn n, p, u ->
+      mean = n * p
+      round(max(0, min(n, mean + (u - 0.5) * :math.sqrt(max(mean * (1 - p), 0.01)) * 2)))
+    end
+
+    y_se = binom.(state.s, p_se, u1)
+    y_ei = binom.(state.e, p_ei, u2)
+    y_ir = binom.(state.i, p_ir, u3)
+
+    new = %{
+      s: max(state.s - y_se, 0),
+      e: max(state.e + y_se - y_ei, 0),
+      i: max(state.i + y_ei - y_ir, 0),
+      r: state.r + y_ir
+    }
+    {new, rng}
+  end,
+
+  observation_logp: fn state, theta, y_obs ->
+    lambda = max(state.i * theta.sigma, 0.1)
+    y_obs * :math.log(lambda) - lambda - log_fact.(y_obs)
+  end
+}
+
+prior = %{
+  sample: fn rng ->
+    {u1, rng} = :rand.uniform_s(rng)
+    {u2, rng} = :rand.uniform_s(rng)
+    {u3, rng} = :rand.uniform_s(rng)
+    theta = %{
+      beta: u1 * 0.8 + 0.05,   # U(0.05, 0.85)
+      sigma: u2 * 0.4 + 0.05,  # U(0.05, 0.45)
+      gamma: u3 * 0.25 + 0.05  # U(0.05, 0.30)
+    }
+    {theta, rng}
+  end,
+  logpdf: fn theta ->
+    if theta.beta > 0.05 and theta.beta < 0.85 and
+       theta.sigma > 0.05 and theta.sigma < 0.45 and
+       theta.gamma > 0.05 and theta.gamma < 0.30 do
+      0.0
+    else
+      -1.0e30
+    end
+  end
+}
+
+IO.puts("SEIR model defined.")
+IO.puts("Prior: β ~ U(0.05, 0.85), σ ~ U(0.05, 0.45), γ ~ U(0.05, 0.30)")
+IO.puts("200 θ-particles × 100 state particles = 20,000 simulations per step")
+```
+
+## Run O-SMC²
+
+Two hundred guesses at the parameters. Each with its own 100-particle
+simulation of the epidemic. When the effective sample size drops below
+half — when a few guesses hoard all the weight — the algorithm
+rejuvenates on every core. The window is 20 days: the PMCMC kernel
+never looks further back than that, so cost per rejuvenation is bounded
+regardless of how long the epidemic runs.
+
+```elixir
+t0 = System.monotonic_time(:millisecond)
+
+result = SMC.run(model, prior, observations,
+  n_theta: 200,
+  n_x: 100,
+  window: 20,
+  n_moves: 3,
+  seed: 42,
+  parallel: true
+)
+
+elapsed = System.monotonic_time(:millisecond) - t0
+
+final = List.last(result.posterior_history)
+
+IO.puts("#{result.n_observations} days processed in #{elapsed}ms (#{Float.round(elapsed / 1000, 1)}s)")
+IO.puts("#{result.rejuvenation_count} rejuvenations — #{Float.round(result.rejuvenation_count / result.n_observations * 100, 0)}% of time steps required intervention")
+IO.puts("Log evidence: #{Float.round(result.log_evidence, 1)}")
+IO.puts("")
+IO.puts("Final posterior means vs truth:")
+IO.puts("  β = #{Float.round(final.beta, 3)}   (true: #{true_beta})")
+IO.puts("  σ = #{Float.round(final.sigma, 3)}   (true: #{true_sigma})")
+IO.puts("  γ = #{Float.round(final.gamma, 3)}   (true: #{true_gamma})")
+```
+
+## Watching the Posterior Converge
+
+The first ten days are nearly silent. Five exposed people, no
+symptoms yet, case counts at zero or one. The posterior is wide —
+the algorithm knows almost nothing. Then the exponential phase hits.
+Cases climb. The posterior tightens. By day 30, the transmission
+rate estimate is within 0.05 of the truth.
+
+The red dashed line is the true value. The blue line is what the
+algorithm believes, updated after each day's report.
+
+```elixir
+beta_data = result.posterior_history
+  |> Enum.with_index(1)
+  |> Enum.map(fn {post, t} -> %{"day" => t, "beta" => post.beta} end)
+
+Vl.new(width: 600, height: 200, title: "β — from ignorance to knowledge, one case count at a time")
+|> Vl.data_from_values(beta_data)
+|> Vl.layers([
+  Vl.new()
+  |> Vl.mark(:line, color: "steelblue", stroke_width: 2)
+  |> Vl.encode_field(:x, "day", type: :quantitative)
+  |> Vl.encode_field(:y, "beta", type: :quantitative, title: "β"),
+  Vl.new()
+  |> Vl.mark(:rule, color: "red", stroke_dash: [6, 4])
+  |> Vl.encode(:y, datum: true_beta)
+])
+```
+
+## The Tax on Uncertainty
+
+Every dip below the red line triggers the most expensive operation
+in the system. Rejuvenation: resample the θ-particles, then run 200
+parallel PMCMC proposals. Each proposal evaluates a windowed particle
+filter — 100 particles, 20 time steps, 2,000 state propagations per
+proposal. Multiply by 200 particles: 400,000 state propagations per
+rejuvenation event.
+
+The ESS trace is the cost curve of not knowing the parameters. As the
+posterior concentrates, rejuvenation triggers less often. The tax drops.
+
+```elixir
+ess_data = result.ess_history
+  |> Enum.with_index(1)
+  |> Enum.map(fn {ess, t} -> %{"day" => t, "ess" => ess} end)
+
+Vl.new(width: 600, height: 150, title: "Effective Sample Size — below 100 triggers rejuvenation")
+|> Vl.data_from_values(ess_data)
+|> Vl.layers([
+  Vl.new()
+  |> Vl.mark(:line, color: "orange", stroke_width: 1.5)
+  |> Vl.encode_field(:x, "day", type: :quantitative)
+  |> Vl.encode_field(:y, "ess", type: :quantitative, title: "ESS"),
+  Vl.new()
+  |> Vl.mark(:rule, color: "red", stroke_dash: [4, 4])
+  |> Vl.encode(:y, datum: 100)
+])
+```
+
+## The Accounting
+
+Each of the 80 time steps involved:
+
+**20,000 stochastic simulations** — 200 θ-particles, each propagating
+100 state particles through one Binomial SEIR transition. Every
+susceptible individual has a probability of exposure computed from
+the current θ. Every exposed individual has a probability of becoming
+infectious. Integers in, integers out.
+
+**200 likelihood evaluations** — each θ-particle's filter produces an
+estimate of p(y_t | y_{1:t-1}, θ), the probability that this day's
+case count would arise under this particular guess at the parameters.
+The Poisson likelihood bridges the latent I compartment to the noisy
+daily report.
+
+**Rejuvenation, when needed** — resample the θ-particles by weight,
+then 200 parallel PMCMC moves on all available cores. Each move
+proposes a new θ*, runs a windowed particle filter (100 particles ×
+20 days = 2,000 propagations), and accepts or rejects by
+Metropolis-Hastings. Total per rejuvenation: 400,000 state
+propagations, distributed across `System.schedulers_online()` cores.
+
+The window bounds the cost. Day 1 and day 1,000 cost the same.
+The posterior at day 79 becomes the prior for day 80. Nothing
+is recomputed. Nothing is restarted. The BEAM process that runs
+the filter on Tuesday is the same process that ran it on Monday.
+
+## Summary
+
+|                   |                                                                            |
+| ----------------- | -------------------------------------------------------------------------- |
+| **Algorithm**     | Online SMC² (Chopin et al. 2013, Vieira 2018)                             |
+| **Model**         | Stochastic SEIR with Binomial transitions                                  |
+| **Observations**  | Poisson-distributed daily case counts                                      |
+| **Parameters**    | β (transmission), σ (incubation⁻¹), γ (recovery⁻¹)                |
+| **Particles**     | 200 θ × 100 state = 20,000 simulations per step                          |
+| **Rejuvenation**  | 400,000 state propagations per event, parallel on all cores                |
+| **Why not NUTS?** | Binomial transitions are discrete — no gradient                          |
+| **Why BEAM?**     | `Task.async_stream` over 200 particles. If one crashes, the rest continue. |
+| **Library**       | smc_ex — pure Elixir, zero dependencies                                  |

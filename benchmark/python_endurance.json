@@ -1,0 +1,58 @@
+[
+  {
+    "name": "smoke-seir (N\u03b8=100,T=40)",
+    "time_ms": 3810,
+    "T": 40,
+    "beta": 0.404,
+    "sigma": 0.169,
+    "gamma": 0.188
+  },
+  {
+    "name": "parallel-smoke (N\u03b8=100,T=40)",
+    "time_ms": 3862,
+    "T": 40,
+    "beta": 0.393,
+    "sigma": 0.167,
+    "gamma": 0.19
+  },
+  {
+    "name": "medium-seir (N\u03b8=200,T=100)",
+    "time_ms": 46025,
+    "T": 100,
+    "beta": 0.211,
+    "sigma": 0.126,
+    "gamma": 0.184
+  },
+  {
+    "name": "time-varying (N\u03b8=200,T=120)",
+    "time_ms": 124944,
+    "T": 120,
+    "beta": 0.351,
+    "sigma": 0.402,
+    "gamma": 0.287
+  },
+  {
+    "name": "high-rejuv (N\u03b8=200,T=80)",
+    "time_ms": 31342,
+    "T": 80,
+    "beta": 0.264,
+    "sigma": 0.386,
+    "gamma": 0.188
+  },
+  {
+    "name": "full-scale (N\u03b8=400,T=200)",
+    "time_ms": 170451,
+    "T": 200,
+    "beta": 0.23,
+    "sigma": 0.163,
+    "gamma": 0.178
+  },
+  {
+    "name": "memory-T500 (N\u03b8=100,T=500)",
+    "time_ms": 65722,
+    "T": 500,
+    "beta": 0.173,
+    "sigma": 0.072,
+    "gamma": 0.195
+  }
+]
