@@ -265,7 +265,7 @@ SMC.run(model, prior, observations)
   inference in stochastic epidemic models." *Epidemics* 52, 100847.
 
 
-## The Ecosystem: Les Trois Chambrées
+## The Ecosystem: _Three Comrades_
 
 _Probabiliers de tous les a priori, unissez-vous!_
 
