@@ -264,7 +264,10 @@ SMC.run(model, prior, observations)
 - Temfack, D. & Wyse, J. (2025). "Sequential Monte Carlo Squared for online
   inference in stochastic epidemic models." *Epidemics* 52, 100847.
 
-## The Ecosystem: Three Comrades
+
+## The Ecosystem: Les Trois Chambrées
+
+_Probabiliers de tous les a priori, unissez-vous!_
 
 smc_ex is one of three standalone Elixir libraries for Bayesian inference.
 Different algorithms, different use cases, zero shared dependencies.
