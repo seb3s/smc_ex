@@ -276,7 +276,7 @@ Different algorithms, different use cases, zero shared dependencies.
 |---|---|---|
 | [**eXMC**](https://github.com/borodark/eXMC) | NUTS / HMC | Known parametric models, continuous parameters |
 | **smc_ex** | Bootstrap PF, PMCMC, Online SMC² | Discrete states, streaming data, epidemic tracking |
-| [**StochTree-Ex**](https://github.com/borodark/stochtree_ex) | BART | Unknown functional form, feature discovery |
+| [**StochTree-Ex**](https://github.com/borodark/ex_stochtree) | BART | Unknown functional form, feature discovery |
 
 They compose in the same application — each is a Mix dependency:
 
